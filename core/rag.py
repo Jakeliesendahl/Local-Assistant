@@ -496,14 +496,45 @@ class ChromaVectorStore:
             logger.error(f"Error getting collection info: {e}")
             raise
     
-    def reset_collection(self):
-        """Reset the collection (delete all documents)."""
+    def delete_documents_by_ids(self, chunk_ids: List[str]) -> bool:
+        """
+        Delete specific documents from the vector store by their chunk IDs.
+        
+        Args:
+            chunk_ids (List[str]): List of chunk IDs to delete
+            
+        Returns:
+            bool: True if deletion was successful
+        """
+        if not chunk_ids:
+            logger.warning("No chunk IDs provided for deletion")
+            return False
+            
+        collection = self._get_or_create_collection()
+        
+        try:
+            collection.delete(ids=chunk_ids)
+            logger.info(f"Deleted {len(chunk_ids)} chunks from vector store")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting chunks from vector store: {e}")
+            return False
+    
+    def reset_collection(self) -> bool:
+        """
+        Reset the collection (delete all documents).
+        
+        Returns:
+            bool: True if reset successfully
+        """
         try:
             self.client.delete_collection(self.collection_name)
             self.collection = None
             logger.info(f"Reset collection: {self.collection_name}")
+            return True
         except Exception as e:
             logger.warning(f"Collection {self.collection_name} might not exist: {e}")
+            return False
 
 
 class DatabaseManager:
@@ -795,16 +826,41 @@ class DatabaseManager:
             
             return [dict(row) for row in cursor.fetchall()]
     
-    def delete_document(self, document_id: int) -> bool:
+    def get_chunk_ids_by_document_id(self, document_id: int) -> List[str]:
         """
-        Delete a document and its chunks from the database.
+        Get all chunk IDs for a specific document.
+        
+        Args:
+            document_id (int): Document ID to get chunk IDs for
+            
+        Returns:
+            List[str]: List of chunk IDs
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT chunk_id FROM chunks WHERE document_id = ?", (document_id,))
+            rows = cursor.fetchall()
+            
+            return [row['chunk_id'] for row in rows]
+
+    def delete_document(self, document_id: int, vector_store: Optional['ChromaVectorStore'] = None) -> bool:
+        """
+        Delete a document and its chunks from the database and optionally from vector store.
         
         Args:
             document_id (int): Document ID to delete
+            vector_store (Optional[ChromaVectorStore]): Vector store to also delete from
             
         Returns:
             bool: True if deleted successfully
         """
+        # Get chunk IDs before deletion if we need to delete from vector store
+        chunk_ids = []
+        if vector_store:
+            chunk_ids = self.get_chunk_ids_by_document_id(document_id)
+        
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -815,8 +871,44 @@ class DatabaseManager:
             
             if deleted:
                 logger.info(f"Deleted document ID {document_id} from database")
+                
+                # Also delete from vector store if provided
+                if vector_store and chunk_ids:
+                    vector_deleted = vector_store.delete_documents_by_ids(chunk_ids)
+                    if vector_deleted:
+                        logger.info(f"Deleted {len(chunk_ids)} chunks from vector store for document ID {document_id}")
+                    else:
+                        logger.warning(f"Failed to delete chunks from vector store for document ID {document_id}")
             
             return deleted
+    
+    def clear_all_data(self) -> bool:
+        """
+        Clear all documents and chunks from the database.
+        
+        Returns:
+            bool: True if cleared successfully
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Delete all chunks first (due to foreign key constraint)
+                cursor.execute("DELETE FROM chunks")
+                chunks_deleted = cursor.rowcount
+                
+                # Delete all documents
+                cursor.execute("DELETE FROM documents")
+                docs_deleted = cursor.rowcount
+                
+                conn.commit()
+                
+                logger.info(f"Cleared all data: {docs_deleted} documents, {chunks_deleted} chunks")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error clearing database: {e}")
+            return False
 
 
 def process_documents_to_vector_store(
@@ -1595,3 +1687,149 @@ def ask_your_files_simple_with_citations(
         
     except Exception as e:
         return f"Error: {str(e)}"
+
+
+def clear_all_chunks_and_documents(
+    vector_store: Optional[ChromaVectorStore] = None,
+    db_manager: Optional[DatabaseManager] = None,
+    persist_directory: str = "data/chroma",
+    db_path: str = "data/db.sqlite"
+) -> Dict[str, Any]:
+    """
+    Remove all chunks and documents from both the vector store and database.
+    
+    This function provides a complete cleanup operation that:
+    1. Clears all documents and chunks from the SQLite database
+    2. Resets the ChromaDB vector store collection
+    3. Returns detailed information about the cleanup operation
+    
+    Args:
+        vector_store (Optional[ChromaVectorStore]): Vector store instance to clear.
+                                                   If None, creates a new instance.
+        db_manager (Optional[DatabaseManager]): Database manager instance to clear.
+                                              If None, creates a new instance.
+        persist_directory (str): Directory containing the Chroma database
+        db_path (str): Path to the SQLite database file
+        
+    Returns:
+        Dict[str, Any]: Results of the cleanup operation including:
+                       - success: bool indicating if operation succeeded
+                       - database_cleared: bool indicating if database was cleared
+                       - vector_store_cleared: bool indicating if vector store was cleared
+                       - stats_before: database stats before clearing
+                       - stats_after: database stats after clearing
+                       - errors: list of any errors encountered
+    """
+    logger.info("Starting complete cleanup of all chunks and documents")
+    
+    results = {
+        'success': False,
+        'database_cleared': False,
+        'vector_store_cleared': False,
+        'stats_before': {},
+        'stats_after': {},
+        'errors': []
+    }
+    
+    try:
+        # Initialize components if not provided
+        if db_manager is None:
+            db_manager = DatabaseManager(db_path)
+        
+        if vector_store is None:
+            vector_store = ChromaVectorStore(persist_directory)
+        
+        # Get stats before clearing
+        try:
+            results['stats_before'] = db_manager.get_database_stats()
+            vector_info = vector_store.get_collection_info()
+            results['stats_before']['vector_store_count'] = vector_info.get('count', 0)
+            logger.info(f"Before clearing - Documents: {results['stats_before']['document_count']}, "
+                       f"Chunks: {results['stats_before']['chunk_count']}, "
+                       f"Vector store: {results['stats_before']['vector_store_count']}")
+        except Exception as e:
+            logger.warning(f"Could not get stats before clearing: {e}")
+            results['errors'].append(f"Could not get pre-cleanup stats: {str(e)}")
+        
+        # Clear the database
+        logger.info("Clearing SQLite database...")
+        try:
+            db_success = db_manager.clear_all_data()
+            results['database_cleared'] = db_success
+            if db_success:
+                logger.info("Successfully cleared SQLite database")
+            else:
+                logger.error("Failed to clear SQLite database")
+                results['errors'].append("Failed to clear SQLite database")
+        except Exception as e:
+            logger.error(f"Error clearing database: {e}")
+            results['errors'].append(f"Database clearing error: {str(e)}")
+            results['database_cleared'] = False
+        
+        # Clear the vector store
+        logger.info("Clearing ChromaDB vector store...")
+        try:
+            vector_success = vector_store.reset_collection()
+            results['vector_store_cleared'] = vector_success
+            if vector_success:
+                logger.info("Successfully cleared ChromaDB vector store")
+            else:
+                logger.error("Failed to clear ChromaDB vector store")
+                results['errors'].append("Failed to clear ChromaDB vector store")
+        except Exception as e:
+            logger.error(f"Error clearing vector store: {e}")
+            results['errors'].append(f"Vector store clearing error: {str(e)}")
+            results['vector_store_cleared'] = False
+        
+        # Get stats after clearing
+        try:
+            results['stats_after'] = db_manager.get_database_stats()
+            vector_info = vector_store.get_collection_info()
+            results['stats_after']['vector_store_count'] = vector_info.get('count', 0)
+            logger.info(f"After clearing - Documents: {results['stats_after']['document_count']}, "
+                       f"Chunks: {results['stats_after']['chunk_count']}, "
+                       f"Vector store: {results['stats_after']['vector_store_count']}")
+        except Exception as e:
+            logger.warning(f"Could not get stats after clearing: {e}")
+            results['errors'].append(f"Could not get post-cleanup stats: {str(e)}")
+        
+        # Determine overall success
+        results['success'] = results['database_cleared'] and results['vector_store_cleared']
+        
+        if results['success']:
+            logger.info("Successfully completed cleanup of all chunks and documents")
+        else:
+            logger.warning("Cleanup completed with some failures")
+            
+        return results
+        
+    except Exception as e:
+        logger.error(f"Unexpected error during cleanup: {e}")
+        results['errors'].append(f"Unexpected error: {str(e)}")
+        results['success'] = False
+        return results
+
+
+def clear_all_chunks_and_documents_simple(
+    persist_directory: str = "data/chroma",
+    db_path: str = "data/db.sqlite"
+) -> bool:
+    """
+    Simple function to clear all chunks and documents.
+    
+    Args:
+        persist_directory (str): Directory containing the Chroma database
+        db_path (str): Path to the SQLite database file
+        
+    Returns:
+        bool: True if cleanup was successful, False otherwise
+    """
+    try:
+        result = clear_all_chunks_and_documents(
+            persist_directory=persist_directory,
+            db_path=db_path
+        )
+        return result['success']
+    except Exception as e:
+        logger.error(f"Error in simple clear function: {e}")
+        return False

@@ -8,7 +8,8 @@ from core.rag import (
     ChromaVectorStore,
     DatabaseManager,
     ingest_document,
-    process_documents_to_vector_store
+    process_documents_to_vector_store,
+    clear_all_chunks_and_documents
 )
 import tempfile
 import time
@@ -306,10 +307,10 @@ elif mode == "📚 Ask Your Files":
                                 
                                 if st.button("🗑️ Remove from database", key=f"delete_{doc['id']}", help="Remove this document and its chunks"):
                                     try:
-                                        # Delete from database
-                                        success = db_manager.delete_document(doc['id'])
+                                        # Delete from database and vector store
+                                        success = db_manager.delete_document(doc['id'], vector_store)
                                         if success:
-                                            st.success(f"Removed {doc['file_name']} from database")
+                                            st.success(f"Removed {doc['file_name']} from database and vector store")
                                             st.rerun()
                                         else:
                                             st.error("Failed to remove document")
@@ -352,6 +353,84 @@ elif mode == "📚 Ask Your Files":
                     total_docs = len(docs)
                     if total_docs > 0:
                         st.metric("Total Storage", f"{stats['database_size_mb']} MB")
+                        
+                        # Initialize session state for clear confirmation
+                        if 'show_clear_confirmation' not in st.session_state:
+                            st.session_state.show_clear_confirmation = False
+                        
+                        # Clear All Data button
+                        if not st.session_state.show_clear_confirmation:
+                            if st.button("🗑️ Clear All Data", 
+                                       help="Remove ALL documents from database and vector store", 
+                                       type="secondary"):
+                                st.session_state.show_clear_confirmation = True
+                                st.rerun()
+                        
+                        # Show confirmation dialog
+                        if st.session_state.show_clear_confirmation:
+                            st.warning("⚠️ **DANGER: This will permanently delete ALL your documents!**")
+                            st.write("This action will:")
+                            st.write("• Remove all documents from the database")
+                            st.write("• Clear the entire vector store") 
+                            st.write("• Cannot be undone!")
+                            
+                            col_confirm1, col_confirm2 = st.columns(2)
+                            with col_confirm1:
+                                if st.button("❌ Cancel", key="cancel_clear"):
+                                    st.session_state.show_clear_confirmation = False
+                                    st.rerun()
+                            
+                            with col_confirm2:
+                                if st.button("🗑️ Yes, Delete Everything", 
+                                           key="confirm_clear", 
+                                           type="primary"):
+                                    try:
+                                        with st.spinner("🗑️ Clearing all data..."):
+                                            # Use the comprehensive clear function
+                                            result = clear_all_chunks_and_documents(
+                                                vector_store=vector_store,
+                                                db_manager=db_manager
+                                            )
+                                            
+                                            # Reset confirmation state
+                                            st.session_state.show_clear_confirmation = False
+                                            
+                                            if result['success']:
+                                                st.success("✅ **All data cleared successfully!**")
+                                                
+                                                # Show detailed results
+                                                if result['stats_before']:
+                                                    stats_before = result['stats_before']
+                                                    cleared_docs = stats_before.get('document_count', 0)
+                                                    cleared_chunks = stats_before.get('chunk_count', 0)
+                                                    cleared_vector = stats_before.get('vector_store_count', 0)
+                                                    
+                                                    st.info(f"📊 **Cleanup Summary:**\n"
+                                                           f"• Removed {cleared_docs} documents\n"
+                                                           f"• Removed {cleared_chunks} chunks from database\n"
+                                                           f"• Removed {cleared_vector} vectors from store")
+                                                
+                                                st.info("💡 You can now upload new documents using the 'Upload Documents' tab.")
+                                                time.sleep(2)  # Brief pause to show success message
+                                                st.rerun()
+                                            else:
+                                                st.error("❌ **Failed to clear all data**")
+                                                
+                                                # Show specific errors
+                                                if result['errors']:
+                                                    st.error("**Errors encountered:**")
+                                                    for error in result['errors']:
+                                                        st.error(f"• {error}")
+                                                
+                                                # Show partial success
+                                                if result['database_cleared'] and not result['vector_store_cleared']:
+                                                    st.warning("⚠️ Database cleared but vector store failed")
+                                                elif result['vector_store_cleared'] and not result['database_cleared']:
+                                                    st.warning("⚠️ Vector store cleared but database failed")
+                                                    
+                                    except Exception as e:
+                                        st.session_state.show_clear_confirmation = False
+                                        st.error(f"❌ Error clearing data: {e}")
                     
     except Exception as e:
         st.error(f"Error loading document stats: {e}")
