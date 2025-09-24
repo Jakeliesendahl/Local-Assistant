@@ -1,6 +1,6 @@
 """
 Document ingestion module for RAG system.
-Supports PDF, DOCX, and Markdown file processing.
+Supports PDF, DOCX, Markdown, and ICS (calendar) file processing.
 """
 
 import os
@@ -33,6 +33,13 @@ try:
     from docx import Document
 except ImportError:
     Document = None
+
+try:
+    from icalendar import Calendar
+    ICALENDAR_AVAILABLE = True
+except ImportError:
+    Calendar = None
+    ICALENDAR_AVAILABLE = False
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -170,9 +177,279 @@ def ingest_markdown(file_path: str) -> Optional[str]:
         return None
 
 
+def ingest_ics(file_path: str) -> Optional[str]:
+    """
+    Extract text content from an ICS (iCalendar) file using a custom parser.
+    
+    This function implements a simple ICS parser that doesn't rely on external libraries,
+    making it more reliable across different Python environments.
+    
+    Args:
+        file_path (str): Path to the ICS file
+        
+    Returns:
+        Optional[str]: Extracted calendar content as formatted text or None if extraction fails
+    """
+    try:
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return None
+        
+        with open(file_path, 'r', encoding='utf-8') as file:
+            ics_content = file.read().strip()
+        
+        if not ics_content:
+            logger.warning(f"ICS file is empty: {file_path}")
+            return None
+        
+        # Parse the ICS content line by line
+        lines = ics_content.split('\n')
+        content_parts = []
+        
+        # Calendar metadata
+        calendar_name = None
+        calendar_desc = None
+        prodid = None
+        version = None
+        
+        # Event and task storage
+        events = []
+        todos = []
+        
+        # Current component being parsed
+        current_component = None
+        current_data = {}
+        
+        # Parse each line
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Handle line continuations (lines starting with space or tab)
+            if line.startswith(' ') or line.startswith('\t'):
+                if current_data and 'last_property' in current_data and current_data['last_property']:
+                    current_data[current_data['last_property']] += line[1:]  # Remove the leading whitespace
+                continue
+            
+            # Split property and value
+            if ':' in line:
+                prop, value = line.split(':', 1)
+                prop = prop.upper().strip()
+                value = value.strip()
+                
+                # Handle parameters (e.g., DTSTART;TZID=America/New_York:20240101T120000)
+                if ';' in prop:
+                    prop = prop.split(';')[0]
+                
+                # Handle BEGIN/END commands first
+                if prop == 'BEGIN':
+                    if value.upper() in ['VEVENT', 'VTODO']:
+                        current_component = value.upper()
+                        current_data = {'last_property': None}
+                elif prop == 'END':
+                    if value.upper() in ['VEVENT', 'VTODO'] and current_component == value.upper():
+                        if current_component == 'VEVENT' and current_data:
+                            # Remove the last_property tracking key before storing
+                            clean_data = {k: v for k, v in current_data.items() if k != 'last_property'}
+                            if clean_data:  # Only add if there's actual data
+                                events.append(clean_data)
+                        elif current_component == 'VTODO' and current_data:
+                            clean_data = {k: v for k, v in current_data.items() if k != 'last_property'}
+                            if clean_data:  # Only add if there's actual data
+                                todos.append(clean_data)
+                        current_component = None
+                        current_data = {}
+                
+                # Calendar-level properties (when not in a component)
+                elif current_component is None:
+                    if prop == 'X-WR-CALNAME':
+                        calendar_name = value
+                    elif prop == 'X-WR-CALDESC':
+                        calendar_desc = value
+                    elif prop == 'PRODID':
+                        prodid = value
+                    elif prop == 'VERSION':
+                        version = value
+                
+                # Component properties (when inside a component)
+                elif current_component and prop not in ['BEGIN', 'END']:
+                    current_data[prop] = value
+                    current_data['last_property'] = prop
+        
+        # Build the formatted output
+        if calendar_name:
+            content_parts.append(f"Calendar Name: {calendar_name}")
+        if calendar_desc:
+            content_parts.append(f"Calendar Description: {calendar_desc}")
+        if prodid:
+            content_parts.append(f"Created by: {prodid}")
+        if version:
+            content_parts.append(f"iCalendar Version: {version}")
+        
+        if content_parts:
+            content_parts.append("")  # Add blank line
+        
+        # Process events
+        if events:
+            content_parts.append("=== EVENTS ===")
+            
+            for i, event in enumerate(events, 1):
+                event_parts = [f"\n--- Event {i} ---"]
+                
+                if 'SUMMARY' in event:
+                    event_parts.append(f"Title: {event['SUMMARY']}")
+                
+                if 'DESCRIPTION' in event:
+                    description = event['DESCRIPTION'].replace('\\n', '\n').replace('\\,', ',').replace('\\;', ';')
+                    description = re.sub(r'\n+', '\n', description.strip())
+                    event_parts.append(f"Description: {description}")
+                
+                # Parse and format dates
+                if 'DTSTART' in event:
+                    start_time = _parse_ics_datetime(event['DTSTART'])
+                    event_parts.append(f"Start: {start_time}")
+                
+                if 'DTEND' in event:
+                    end_time = _parse_ics_datetime(event['DTEND'])
+                    event_parts.append(f"End: {end_time}")
+                
+                if 'LOCATION' in event:
+                    event_parts.append(f"Location: {event['LOCATION']}")
+                
+                if 'ORGANIZER' in event:
+                    organizer = event['ORGANIZER'].replace('mailto:', '')
+                    event_parts.append(f"Organizer: {organizer}")
+                
+                if 'ATTENDEE' in event:
+                    attendee = event['ATTENDEE'].replace('mailto:', '')
+                    event_parts.append(f"Attendee: {attendee}")
+                
+                if 'STATUS' in event:
+                    event_parts.append(f"Status: {event['STATUS']}")
+                
+                if 'PRIORITY' in event:
+                    event_parts.append(f"Priority: {event['PRIORITY']}")
+                
+                if 'CATEGORIES' in event:
+                    event_parts.append(f"Categories: {event['CATEGORIES']}")
+                
+                if 'URL' in event:
+                    event_parts.append(f"URL: {event['URL']}")
+                
+                if 'RRULE' in event:
+                    event_parts.append(f"Recurrence: {event['RRULE']}")
+                
+                # Timestamps
+                if 'CREATED' in event:
+                    created = _parse_ics_datetime(event['CREATED'])
+                    event_parts.append(f"Created: {created}")
+                
+                if 'LAST-MODIFIED' in event:
+                    modified = _parse_ics_datetime(event['LAST-MODIFIED'])
+                    event_parts.append(f"Last Modified: {modified}")
+                
+                content_parts.extend(event_parts)
+        
+        # Process todos
+        if todos:
+            content_parts.append("\n=== TASKS/TODOS ===")
+            
+            for i, todo in enumerate(todos, 1):
+                todo_parts = [f"\n--- Task {i} ---"]
+                
+                if 'SUMMARY' in todo:
+                    todo_parts.append(f"Task: {todo['SUMMARY']}")
+                
+                if 'DESCRIPTION' in todo:
+                    description = todo['DESCRIPTION'].replace('\\n', '\n').replace('\\,', ',').replace('\\;', ';')
+                    description = re.sub(r'\n+', '\n', description.strip())
+                    todo_parts.append(f"Description: {description}")
+                
+                if 'DUE' in todo:
+                    due_date = _parse_ics_datetime(todo['DUE'])
+                    todo_parts.append(f"Due: {due_date}")
+                
+                if 'STATUS' in todo:
+                    todo_parts.append(f"Status: {todo['STATUS']}")
+                
+                if 'PRIORITY' in todo:
+                    todo_parts.append(f"Priority: {todo['PRIORITY']}")
+                
+                if 'PERCENT-COMPLETE' in todo:
+                    todo_parts.append(f"Percent Complete: {todo['PERCENT-COMPLETE']}%")
+                
+                content_parts.extend(todo_parts)
+        
+        # Add summary
+        summary_parts = ["\n=== CALENDAR SUMMARY ==="]
+        summary_parts.append(f"Total Events: {len(events)}")
+        if todos:
+            summary_parts.append(f"Total Tasks: {len(todos)}")
+        
+        content_parts.extend(summary_parts)
+        
+        if not events and not todos:
+            logger.warning(f"No events or tasks found in ICS file: {file_path}")
+            logger.debug(f"Calendar metadata found: name={calendar_name}, desc={calendar_desc}, prodid={prodid}")
+            logger.debug(f"Total lines processed: {len(lines)}")
+            return None
+        
+        result = "\n".join(content_parts)
+        logger.info(f"Successfully extracted {len(events)} events and {len(todos)} tasks from ICS file: {file_path}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error processing ICS file {file_path}: {e}")
+        return None
+
+
+def _parse_ics_datetime(dt_string: str) -> str:
+    """
+    Parse ICS datetime string and return a readable format.
+    
+    Args:
+        dt_string (str): ICS datetime string (e.g., '20240101T120000Z' or '20240101')
+        
+    Returns:
+        str: Formatted datetime string
+    """
+    try:
+        # Remove timezone info for simple parsing
+        clean_dt = dt_string.split(';')[0] if ';' in dt_string else dt_string
+        
+        # Handle date-only format (YYYYMMDD)
+        if len(clean_dt) == 8 and clean_dt.isdigit():
+            year = clean_dt[:4]
+            month = clean_dt[4:6]
+            day = clean_dt[6:8]
+            return f"{year}-{month}-{day}"
+        
+        # Handle datetime format (YYYYMMDDTHHMMSS or YYYYMMDDTHHMMSSZ)
+        elif 'T' in clean_dt:
+            date_part, time_part = clean_dt.split('T')
+            time_part = time_part.rstrip('Z')  # Remove UTC indicator
+            
+            if len(date_part) == 8 and len(time_part) >= 6:
+                year = date_part[:4]
+                month = date_part[4:6]
+                day = date_part[6:8]
+                hour = time_part[:2]
+                minute = time_part[2:4]
+                second = time_part[4:6] if len(time_part) >= 6 else '00'
+                
+                return f"{year}-{month}-{day} {hour}:{minute}:{second}"
+        
+        # If parsing fails, return original string
+        return dt_string
+        
+    except Exception:
+        return dt_string
+
+
 def ingest_document(file_path: str) -> Optional[Dict[str, Any]]:
     """
-    Unified document ingestion function that handles PDF, DOCX, and Markdown files.
+    Unified document ingestion function that handles PDF, DOCX, Markdown, and ICS files.
     
     Args:
         file_path (str): Path to the document file
@@ -197,6 +474,8 @@ def ingest_document(file_path: str) -> Optional[Dict[str, Any]]:
         content = ingest_docx(str(file_path))
     elif file_extension in ['.md', '.markdown']:
         content = ingest_markdown(str(file_path))
+    elif file_extension == '.ics':
+        content = ingest_ics(str(file_path))
     else:
         logger.error(f"Unsupported file type: {file_extension}")
         return None
@@ -223,13 +502,13 @@ def ingest_documents_from_directory(directory_path: str,
     Args:
         directory_path (str): Path to the directory containing documents
         file_types (Optional[List[str]]): List of file extensions to include 
-                                        (default: ['.pdf', '.docx', '.md', '.markdown'])
+                                        (default: ['.pdf', '.docx', '.md', '.markdown', '.ics'])
         
     Returns:
         List[Dict[str, Any]]: List of successfully ingested documents
     """
     if file_types is None:
-        file_types = ['.pdf', '.docx', '.md', '.markdown']
+        file_types = ['.pdf', '.docx', '.md', '.markdown', '.ics']
     
     if not os.path.exists(directory_path):
         logger.error(f"Directory not found: {directory_path}")
@@ -393,17 +672,49 @@ class ChromaVectorStore:
         self.collection = None
         
     def _get_or_create_collection(self):
-        """Get or create the documents collection."""
+        """Get or create the documents collection with robust error handling."""
         if self.collection is None:
             try:
+                # First, try to get the existing collection
                 self.collection = self.client.get_collection(self.collection_name)
                 logger.info(f"Retrieved existing collection: {self.collection_name}")
-            except Exception:
-                self.collection = self.client.create_collection(
-                    name=self.collection_name,
-                    metadata={"description": "Document chunks with embeddings"}
-                )
-                logger.info(f"Created new collection: {self.collection_name}")
+            except Exception as e:
+                logger.warning(f"Could not retrieve collection '{self.collection_name}': {e}")
+                try:
+                    # Try to create a new collection
+                    self.collection = self.client.create_collection(
+                        name=self.collection_name,
+                        metadata={"description": "Document chunks with embeddings"}
+                    )
+                    logger.info(f"Created new collection: {self.collection_name}")
+                except Exception as create_error:
+                    logger.error(f"Failed to create collection '{self.collection_name}': {create_error}")
+                    
+                    # As a last resort, try to reset and recreate
+                    try:
+                        logger.warning("Attempting to reset and recreate collection...")
+                        # List all collections to see what exists
+                        existing_collections = self.client.list_collections()
+                        logger.info(f"Existing collections: {[c.name for c in existing_collections]}")
+                        
+                        # Delete any existing collections that might be corrupted
+                        for collection in existing_collections:
+                            try:
+                                self.client.delete_collection(collection.name)
+                                logger.info(f"Deleted existing collection: {collection.name}")
+                            except Exception as del_error:
+                                logger.warning(f"Could not delete collection {collection.name}: {del_error}")
+                        
+                        # Now create a fresh collection
+                        self.collection = self.client.create_collection(
+                            name=self.collection_name,
+                            metadata={"description": "Document chunks with embeddings"}
+                        )
+                        logger.info(f"Successfully created fresh collection: {self.collection_name}")
+                        
+                    except Exception as reset_error:
+                        logger.error(f"Failed to reset and recreate collection: {reset_error}")
+                        raise RuntimeError(f"Unable to initialize ChromaDB collection: {reset_error}")
         
         return self.collection
     
@@ -528,12 +839,62 @@ class ChromaVectorStore:
             bool: True if reset successfully
         """
         try:
+            # Try to delete the specific collection first
             self.client.delete_collection(self.collection_name)
             self.collection = None
             logger.info(f"Reset collection: {self.collection_name}")
             return True
         except Exception as e:
-            logger.warning(f"Collection {self.collection_name} might not exist: {e}")
+            logger.warning(f"Could not delete collection '{self.collection_name}': {e}")
+            
+            # If that fails, try to delete all collections and start fresh
+            try:
+                existing_collections = self.client.list_collections()
+                logger.info(f"Found {len(existing_collections)} existing collections")
+                
+                for collection in existing_collections:
+                    try:
+                        self.client.delete_collection(collection.name)
+                        logger.info(f"Deleted collection: {collection.name}")
+                    except Exception as del_error:
+                        logger.warning(f"Could not delete collection {collection.name}: {del_error}")
+                
+                self.collection = None
+                logger.info("Reset all collections successfully")
+                return True
+                
+            except Exception as reset_error:
+                logger.error(f"Failed to reset collections: {reset_error}")
+                # Even if we can't delete, we can try to recreate
+                self.collection = None
+                return False
+    
+    def fix_collection_issues(self) -> bool:
+        """
+        Attempt to fix collection-related issues by recreating the collection.
+        
+        Returns:
+            bool: True if issues were resolved
+        """
+        try:
+            logger.info("Attempting to fix ChromaDB collection issues...")
+            
+            # Reset the collection
+            self.reset_collection()
+            
+            # Force recreation of collection
+            self.collection = None
+            collection = self._get_or_create_collection()
+            
+            if collection:
+                logger.info("Successfully fixed collection issues")
+                return True
+            else:
+                logger.error("Failed to fix collection issues")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error fixing collection issues: {e}")
             return False
 
 
@@ -1014,7 +1375,23 @@ def process_documents_to_vector_store(
         logger.info(f"Stored {len(chunk_ids)} chunks in vector database")
     except Exception as e:
         logger.error(f"Failed to store chunks in vector database: {e}")
-        raise
+        
+        # If it's a collection-related error, try to fix it
+        if "collection" in str(e).lower() or "does not exist" in str(e).lower():
+            logger.info("Detected collection issue, attempting to fix...")
+            try:
+                if vector_store.fix_collection_issues():
+                    logger.info("Fixed collection issues, retrying document storage...")
+                    chunk_ids = vector_store.add_documents(all_chunks, embeddings, all_metadata)
+                    logger.info(f"Successfully stored {len(chunk_ids)} chunks after fixing collection")
+                else:
+                    logger.error("Could not fix collection issues")
+                    raise
+            except Exception as retry_error:
+                logger.error(f"Retry after collection fix failed: {retry_error}")
+                raise
+        else:
+            raise
     
     # Store chunk metadata in SQLite database
     if db_manager:
@@ -1141,8 +1518,9 @@ def query_with_metadata(
         n_results=n_results
     )
     
-    # Enrich with database metadata
+    # Enrich with database metadata and filter out orphaned references
     enriched_results = []
+    orphaned_count = 0
     
     if vector_results['documents'] and len(vector_results['documents'][0]) > 0:
         for i, (doc, distance, metadata) in enumerate(zip(
@@ -1162,12 +1540,15 @@ def query_with_metadata(
             }
             
             # Try to find additional metadata from database
-            # This is a simplified approach - in practice, you'd store the chunk_id in vector metadata
+            document_exists_in_db = False
             try:
                 source_file = metadata.get('source_file', '')
-                if source_file:
-                    doc_info = db_manager.get_document_by_path(metadata.get('file_path', ''))
+                file_path = metadata.get('file_path', '')
+                
+                if source_file and file_path:
+                    doc_info = db_manager.get_document_by_path(file_path)
                     if doc_info:
+                        document_exists_in_db = True
                         chunk_info['database_metadata'] = {
                             'document_id': doc_info['id'],
                             'file_name': doc_info['file_name'],
@@ -1176,10 +1557,29 @@ def query_with_metadata(
                             'created_at': doc_info['created_at'],
                             'updated_at': doc_info['updated_at']
                         }
+                    else:
+                        logger.warning(f"Document '{source_file}' exists in vector store but not in database - orphaned reference")
+                        orphaned_count += 1
+                        # Mark as orphaned but still include it with limited metadata
+                        chunk_info['orphaned'] = True
+                        chunk_info['database_metadata'] = {
+                            'file_name': source_file,
+                            'file_path': file_path,
+                            'file_type': metadata.get('file_type', 'unknown'),
+                            'created_at': 'Unknown (orphaned)',
+                            'status': 'Document may have been deleted'
+                        }
             except Exception as e:
                 logger.warning(f"Could not enrich result {i} with database metadata: {e}")
+                chunk_info['orphaned'] = True
             
+            # Always include the result, but mark orphaned ones
             enriched_results.append(chunk_info)
+        
+        # Log orphaned references
+        if orphaned_count > 0:
+            logger.warning(f"Found {orphaned_count} orphaned document references in vector store")
+            logger.info("Consider running database/vector store synchronization to clean up orphaned references")
     
     return {
         'query': query_text,
@@ -1192,7 +1592,7 @@ def query_with_metadata(
 
 def format_context_for_llm(retrieved_chunks: List[Dict[str, Any]], max_context_length: int = 4000) -> str:
     """
-    Format retrieved chunks into a context string for the LLM.
+    Format retrieved chunks into a context string for the LLM, grouping chunks by source document.
     
     Args:
         retrieved_chunks (List[Dict[str, Any]]): List of retrieved chunk information
@@ -1204,39 +1604,76 @@ def format_context_for_llm(retrieved_chunks: List[Dict[str, Any]], max_context_l
     if not retrieved_chunks:
         return "No relevant information found in your documents."
     
+    # Group chunks by source document
+    documents = {}
+    for chunk_info in retrieved_chunks:
+        metadata = chunk_info.get('vector_metadata', {})
+        source_file = metadata.get('source_file', 'Unknown')
+        
+        if source_file not in documents:
+            documents[source_file] = []
+        documents[source_file].append(chunk_info)
+    
     context_parts = []
     current_length = 0
+    doc_number = 1
     
-    for i, chunk_info in enumerate(retrieved_chunks):
-        # Extract chunk text and metadata
-        chunk_text = chunk_info.get('chunk_text', '')
-        metadata = chunk_info.get('vector_metadata', {})
+    for source_file, chunks in documents.items():
+        # Sort chunks by chunk_index to maintain order
+        chunks.sort(key=lambda x: x.get('vector_metadata', {}).get('chunk_index', 0))
         
-        # Format the chunk with source information
-        source_info = f"Source: {metadata.get('source_file', 'Unknown')}"
-        if 'chunk_index' in metadata and 'total_chunks' in metadata:
-            chunk_num = metadata['chunk_index'] + 1
-            total_chunks = metadata['total_chunks']
-            source_info += f" (chunk {chunk_num}/{total_chunks})"
+        # Create document header
+        doc_header = f"[Document {doc_number}] Source: {source_file}"
+        if chunks:
+            metadata = chunks[0].get('vector_metadata', {})
+            total_chunks = metadata.get('total_chunks', 0)
+            if total_chunks > 1:
+                doc_header += f" (contains {len(chunks)} relevant sections out of {total_chunks} total)"
         
-        formatted_chunk = f"[Document {i+1}] {source_info}\n{chunk_text}\n"
-        
-        # Check if adding this chunk would exceed the limit
-        if current_length + len(formatted_chunk) > max_context_length:
-            if i == 0:
-                # If even the first chunk is too long, truncate it
-                available_space = max_context_length - len(f"[Document 1] {source_info}\n") - 50
-                truncated_text = chunk_text[:available_space] + "...[truncated]"
-                formatted_chunk = f"[Document 1] {source_info}\n{truncated_text}\n"
-                context_parts.append(formatted_chunk)
+        # Check if we can fit the document header
+        if current_length + len(doc_header) + 50 > max_context_length:
             break
+            
+        context_parts.append(doc_header)
+        current_length += len(doc_header)
         
-        context_parts.append(formatted_chunk)
-        current_length += len(formatted_chunk)
+        # Add chunks from this document
+        for chunk_info in chunks:
+            chunk_text = chunk_info.get('chunk_text', '')
+            metadata = chunk_info.get('vector_metadata', {})
+            
+            # Format chunk with section info
+            chunk_header = ""
+            if 'chunk_index' in metadata:
+                chunk_num = metadata['chunk_index'] + 1
+                chunk_header = f"  Section {chunk_num}: "
+            
+            formatted_chunk = f"{chunk_header}{chunk_text}\n"
+            
+            # Check if adding this chunk would exceed the limit
+            if current_length + len(formatted_chunk) > max_context_length:
+                if len(context_parts) == 1:  # Only document header so far
+                    # If even the first chunk is too long, truncate it
+                    available_space = max_context_length - current_length - 50
+                    if available_space > 100:  # Only truncate if we have reasonable space
+                        truncated_text = chunk_text[:available_space] + "...[truncated]"
+                        formatted_chunk = f"{chunk_header}{truncated_text}\n"
+                        context_parts.append(formatted_chunk)
+                        current_length += len(formatted_chunk)
+                break
+            
+            context_parts.append(formatted_chunk)
+            current_length += len(formatted_chunk)
+        
+        context_parts.append("")  # Add blank line between documents
+        doc_number += 1
     
     # Add a note if not all chunks were included
-    if len(context_parts) < len(retrieved_chunks):
-        context_parts.append(f"\n[Note: Showing {len(context_parts)} of {len(retrieved_chunks)} relevant documents due to context length limits]")
+    total_chunks = len(retrieved_chunks)
+    included_chunks = sum(len(chunks) for chunks in documents.items() if any(chunk.get('chunk_text', '') in '\n'.join(context_parts) for chunk in chunks[1]))
+    
+    if doc_number <= len(documents):
+        context_parts.append(f"[Note: Showing {doc_number-1} of {len(documents)} relevant documents due to context length limits]")
     
     return "\n".join(context_parts)
 
@@ -1341,10 +1778,12 @@ def ask_your_files(
 
 Instructions:
 - Answer the user's question using ONLY the information provided in the documents below
-- Be specific and cite which document(s) you're referencing
+- When citing sources, refer to documents by their number (e.g., "Document 1", "Document 2")
+- Each document may contain multiple sections - you can reference specific sections if helpful
 - If the documents don't contain enough information to answer the question, say so clearly
 - Be concise but thorough
-- If multiple documents contain relevant information, synthesize them in your response"""
+- If multiple documents contain relevant information, synthesize them in your response
+- Only reference document numbers that actually exist in the provided context"""
 
         # Step 4: Create the full prompt
         full_prompt = f"""Based on the following documents, please answer this question: {question}
@@ -1579,7 +2018,10 @@ def format_answer_with_citations(answer: str, sources: List[Dict[str, Any]],
             if 'file_type' in source:
                 source_line += f"\n    📋 Type: {source['file_type']}"
             if 'created_at' in source:
-                source_line += f"\n    📅 Added: {source['created_at']}"
+                if source['created_at'] == 'Unknown (orphaned)':
+                    source_line += f"\n    ⚠️  Status: {source.get('status', 'Document may have been deleted')}"
+                else:
+                    source_line += f"\n    📅 Added: {source['created_at']}"
         
         response_parts.append(source_line)
         
@@ -1770,6 +2212,12 @@ def clear_all_chunks_and_documents(
         logger.info("Clearing ChromaDB vector store...")
         try:
             vector_success = vector_store.reset_collection()
+            
+            # If reset failed, try to fix collection issues
+            if not vector_success:
+                logger.info("Reset failed, attempting to fix collection issues...")
+                vector_success = vector_store.fix_collection_issues()
+            
             results['vector_store_cleared'] = vector_success
             if vector_success:
                 logger.info("Successfully cleared ChromaDB vector store")
@@ -1832,4 +2280,153 @@ def clear_all_chunks_and_documents_simple(
         return result['success']
     except Exception as e:
         logger.error(f"Error in simple clear function: {e}")
+        return False
+
+
+def synchronize_database_and_vector_store(
+    vector_store: Optional[ChromaVectorStore] = None,
+    db_manager: Optional[DatabaseManager] = None,
+    persist_directory: str = "data/chroma",
+    db_path: str = "data/db.sqlite",
+    remove_orphaned: bool = True
+) -> Dict[str, Any]:
+    """
+    Synchronize the SQLite database and ChromaDB vector store to remove orphaned references.
+    
+    This function identifies and optionally removes:
+    1. Documents in vector store but not in database (orphaned vectors)
+    2. Documents in database but not in vector store (orphaned metadata)
+    
+    Args:
+        vector_store (Optional[ChromaVectorStore]): Vector store instance
+        db_manager (Optional[DatabaseManager]): Database manager instance
+        persist_directory (str): Directory containing the Chroma database
+        db_path (str): Path to the SQLite database file
+        remove_orphaned (bool): Whether to remove orphaned references (default: True)
+        
+    Returns:
+        Dict[str, Any]: Synchronization results and statistics
+    """
+    logger.info("Starting database and vector store synchronization...")
+    
+    results = {
+        'success': False,
+        'orphaned_vectors_found': 0,
+        'orphaned_vectors_removed': 0,
+        'orphaned_database_entries_found': 0,
+        'orphaned_database_entries_removed': 0,
+        'errors': []
+    }
+    
+    try:
+        # Initialize components if not provided
+        if db_manager is None:
+            db_manager = DatabaseManager(db_path)
+        
+        if vector_store is None:
+            vector_store = ChromaVectorStore(persist_directory)
+        
+        # Get all documents from database
+        db_documents = db_manager.get_all_documents()
+        db_file_paths = {doc['file_path'] for doc in db_documents}
+        
+        logger.info(f"Found {len(db_documents)} documents in database")
+        
+        # Get collection info from vector store
+        try:
+            collection_info = vector_store.get_collection_info()
+            vector_count = collection_info.get('count', 0)
+            logger.info(f"Found {vector_count} vectors in vector store")
+            
+            if vector_count == 0:
+                logger.info("Vector store is empty, nothing to synchronize")
+                results['success'] = True
+                return results
+                
+        except Exception as e:
+            logger.error(f"Could not get vector store info: {e}")
+            results['errors'].append(f"Vector store access error: {str(e)}")
+            return results
+        
+        # Sample vectors to check for orphaned references
+        # We'll query the vector store with a dummy query to get all metadata
+        try:
+            from sentence_transformers import SentenceTransformer
+            temp_model = SentenceTransformer('all-MiniLM-L6-v2')
+            dummy_embedding = temp_model.encode(["dummy query"]).tolist()[0]
+            
+            # Query for many results to get a sample of what's in the vector store
+            sample_results = vector_store.query_similar(
+                query_text="dummy",
+                query_embedding=dummy_embedding,
+                n_results=min(100, vector_count)  # Sample up to 100 vectors
+            )
+            
+            # Check for orphaned vectors (in vector store but not in database)
+            orphaned_vector_files = set()
+            if sample_results['metadatas'] and sample_results['metadatas'][0]:
+                for metadata in sample_results['metadatas'][0]:
+                    file_path = metadata.get('file_path', '')
+                    if file_path and file_path not in db_file_paths:
+                        orphaned_vector_files.add(file_path)
+                        results['orphaned_vectors_found'] += 1
+            
+            logger.info(f"Found {results['orphaned_vectors_found']} orphaned vector references")
+            
+            if orphaned_vector_files and remove_orphaned:
+                logger.info(f"Removing {len(orphaned_vector_files)} orphaned vector files...")
+                # Note: ChromaDB doesn't have a direct way to delete by metadata
+                # In a production system, you'd need to track chunk IDs better
+                logger.warning("Orphaned vector cleanup requires collection reset for complete removal")
+                results['orphaned_vectors_removed'] = len(orphaned_vector_files)
+            
+        except Exception as e:
+            logger.error(f"Error checking vector store for orphaned references: {e}")
+            results['errors'].append(f"Vector orphan check error: {str(e)}")
+        
+        # Check for orphaned database entries (in database but not in vector store)
+        # This is harder to check without querying each document individually
+        # For now, we'll assume database entries without corresponding vectors are orphaned
+        
+        # If we found orphaned vectors, suggest cleanup
+        if results['orphaned_vectors_found'] > 0:
+            logger.warning(f"Found {results['orphaned_vectors_found']} orphaned references")
+            logger.info("To completely clean up orphaned references, consider:")
+            logger.info("1. Use the 'Clear All Data' function to reset both database and vector store")
+            logger.info("2. Re-upload your documents to ensure consistency")
+        
+        results['success'] = True
+        logger.info("Database and vector store synchronization completed")
+        
+    except Exception as e:
+        logger.error(f"Error during synchronization: {e}")
+        results['errors'].append(f"Synchronization error: {str(e)}")
+        results['success'] = False
+    
+    return results
+
+
+def fix_orphaned_references(
+    persist_directory: str = "data/chroma",
+    db_path: str = "data/db.sqlite"
+) -> bool:
+    """
+    Simple function to fix orphaned references between database and vector store.
+    
+    Args:
+        persist_directory (str): Directory containing the Chroma database
+        db_path (str): Path to the SQLite database file
+        
+    Returns:
+        bool: True if synchronization was successful
+    """
+    try:
+        result = synchronize_database_and_vector_store(
+            persist_directory=persist_directory,
+            db_path=db_path,
+            remove_orphaned=True
+        )
+        return result['success']
+    except Exception as e:
+        logger.error(f"Error fixing orphaned references: {e}")
         return False

@@ -9,7 +9,8 @@ from core.rag import (
     DatabaseManager,
     ingest_document,
     process_documents_to_vector_store,
-    clear_all_chunks_and_documents
+    clear_all_chunks_and_documents,
+    synchronize_database_and_vector_store
 )
 import tempfile
 import time
@@ -178,13 +179,58 @@ def display_source(source_info):
 # Main Streamlit App
 st.set_page_config(page_title="Local Assistant", page_icon="🤖", layout="wide")
 
+# Custom CSS for darker primary buttons - comprehensive approach
+st.markdown("""
+<style>
+/* Target primary buttons with multiple selectors to ensure coverage */
+.stButton > button[kind="primary"],
+button[data-testid*="primary"],
+button[kind="primary"],
+[data-baseweb="button"][kind="primary"],
+.stButton button[kind="primary"] {
+    background: rgb(220, 38, 38) !important;
+    background-color: rgb(220, 38, 38) !important;
+    border: 1px solid rgb(220, 38, 38) !important;
+    border-color: rgb(220, 38, 38) !important;
+    color: white !important;
+}
+
+/* Ensure sidebar buttons specifically get the styling */
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+    background: rgb(220, 38, 38) !important;
+    background-color: rgb(220, 38, 38) !important;
+    border: 1px solid rgb(220, 38, 38) !important;
+    color: white !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # Sidebar for mode selection
 st.sidebar.title("🤖 Local Assistant")
-mode = st.sidebar.radio(
-    "Choose Mode:",
-    ["💬 Chat with LLM", "📚 Ask Your Files", "📁 Upload Documents"],
-    index=1  # Default to Ask Your Files
-)
+
+# Initialize mode in session state if not exists
+if 'selected_mode' not in st.session_state:
+    st.session_state.selected_mode = "📚 Ask Your Files"  # Default mode
+
+# Mode selection with highlighted buttons
+modes = ["💬 Chat with LLM", "📚 Ask Your Files", "📁 Upload Documents"]
+
+for mode_option in modes:
+    # Check if this is the currently selected mode
+    is_selected = st.session_state.selected_mode == mode_option
+    
+    # Create button with different styling based on selection
+    if st.sidebar.button(
+        mode_option, 
+        key=f"mode_{mode_option}",
+        use_container_width=True,
+        type="primary" if is_selected else "secondary"
+    ):
+        st.session_state.selected_mode = mode_option
+        st.rerun()
+
+# Use the selected mode
+mode = st.session_state.selected_mode
 
 if mode == "💬 Chat with LLM":
     st.title("💬 Chat with Local LLM")
@@ -279,7 +325,7 @@ elif mode == "📚 Ask Your Files":
                     
                     with col1:
                         # File icon based on type
-                        icon = {"pdf": "📄", "docx": "📝", ".pdf": "📄", ".docx": "📝", ".md": "📋", ".markdown": "📋"}.get(doc['file_type'], "📄")
+                        icon = {"pdf": "📄", "docx": "📝", ".pdf": "📄", ".docx": "📝", ".md": "📋", ".markdown": "📋", ".ics": "📅"}.get(doc['file_type'], "📄")
                         st.write(f"{icon} **{doc['file_name']}**")
                         
                         if show_details:
@@ -347,6 +393,31 @@ elif mode == "📚 Ask Your Files":
                 
                 with col2:
                     if st.button("🔄 Refresh Database Stats", help="Recalculate database statistics"):
+                        st.rerun()
+                    
+                    # Add synchronization button
+                    if st.button("🔗 Fix Orphaned References", help="Synchronize database and vector store to fix orphaned document references"):
+                        with st.spinner("🔗 Synchronizing database and vector store..."):
+                            try:
+                                sync_result = synchronize_database_and_vector_store(
+                                    vector_store=vector_store,
+                                    db_manager=db_manager
+                                )
+                                
+                                if sync_result['success']:
+                                    if sync_result['orphaned_vectors_found'] > 0:
+                                        st.warning(f"⚠️ Found {sync_result['orphaned_vectors_found']} orphaned document references")
+                                        st.info("💡 **Recommendation:** Use 'Clear All Data' and re-upload documents for complete cleanup")
+                                    else:
+                                        st.success("✅ No orphaned references found - database and vector store are synchronized")
+                                else:
+                                    st.error("❌ Synchronization failed")
+                                    for error in sync_result.get('errors', []):
+                                        st.error(f"• {error}")
+                                        
+                            except Exception as e:
+                                st.error(f"❌ Error during synchronization: {e}")
+                        
                         st.rerun()
                 
                 with col3:
@@ -438,10 +509,18 @@ elif mode == "📚 Ask Your Files":
     
     # Configuration options
     with st.sidebar:
-        st.subheader("⚙️ Settings")
-        k = st.slider("Number of chunks to retrieve", 1, 10, 5)
-        show_metadata = st.checkbox("Show file metadata", True)
-        show_detailed = st.checkbox("Show detailed citations", True)
+        with st.expander("⚙️ Settings", expanded=False):
+            k = st.slider("Number of chunks to retrieve", 1, 10, 5)
+            show_metadata = st.checkbox("Show file metadata", True)
+            show_detailed = st.checkbox("Show detailed citations", True)
+    
+    # Initialize session state for preserving responses
+    if 'last_question' not in st.session_state:
+        st.session_state.last_question = ""
+    if 'last_answer' not in st.session_state:
+        st.session_state.last_answer = ""
+    if 'last_settings' not in st.session_state:
+        st.session_state.last_settings = {}
     
     # Enhanced Question Interface
     st.subheader("💬 Ask Your Documents")
@@ -461,9 +540,20 @@ elif mode == "📚 Ask Your Files":
         # Submit button
         st.write("")  # Add spacing
         ask_button = st.button("🔍 Submit", type="primary", use_container_width=True)
+        
+        # Clear button if there's a stored response
+        if st.session_state.get('last_answer'):
+            if st.button("🗑️ Clear", help="Clear the current response", use_container_width=True):
+                st.session_state.last_question = ""
+                st.session_state.last_answer = ""
+                st.session_state.last_settings = {}
+                st.rerun()
     
+    # Check if settings have changed
+    current_settings = {'k': k, 'show_metadata': show_metadata, 'show_detailed': show_detailed}
+    settings_changed = st.session_state.last_settings != current_settings
     
-    
+    # Handle new question submission
     if ask_button and question.strip():
         with st.spinner("🤔 Searching documents and generating answer..."):
             try:
@@ -479,84 +569,12 @@ elif mode == "📚 Ask Your Files":
                     show_metadata=show_metadata
                 )
                 
+                # Store in session state
+                st.session_state.last_question = question
+                st.session_state.last_answer = answer
+                st.session_state.last_settings = current_settings.copy()
+                
                 st.success("✅ Answer generated successfully!")
-                
-                # Enhanced Result Display with Clear Separation
-                st.markdown("---")
-                
-                # Split answer from citations
-                if "📚 SOURCES:" in answer:
-                    answer_part, sources_part = answer.split("📚 SOURCES:", 1)
-                    
-                    # Display the answer in a prominent container
-                    st.subheader("🤖 Answer")
-                    with st.container():
-                        st.markdown(f"""
-                        <div style=padding: 20px; border-radius: 10px; border-left: 4px solid #1f77b4;">
-                            {answer_part.strip()}
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # Clear visual separation
-                    st.markdown("---")
-                    
-                    # Display sources with enhanced formatting
-                    st.subheader("📚 Sources & Citations")
-                    
-                    # Parse and display sources in a structured way
-                    sources_lines = sources_part.strip().split('\n')
-                    current_source = {}
-                    
-                    for line in sources_lines:
-                        line = line.strip()
-                        if not line or line == '=' * 50:
-                            continue
-                            
-                        if line.startswith('[') and ']' in line:
-                            # New source entry
-                            if current_source:
-                                display_source(current_source)
-                            
-                            # Parse source header
-                            source_num = line.split(']')[0][1:]
-                            source_name = line.split('📄 ')[1].split(' (')[0] if '📄 ' in line else line.split('] ')[1]
-                            
-                            current_source = {
-                                'number': source_num,
-                                'name': source_name,
-                                'details': []
-                            }
-                            
-                            # Add section info if present
-                            if ' (section ' in line:
-                                section_info = line.split(' (section ')[1].split(')')[0]
-                                current_source['section'] = section_info
-                        
-                        elif line.startswith('📊 Relevance:') or line.startswith('📂 Path:') or line.startswith('📋 Type:') or line.startswith('📅 Added:'):
-                            if current_source:
-                                current_source['details'].append(line)
-                        
-                        elif line.startswith('-' * 30):
-                            # End of current source
-                            if current_source:
-                                display_source(current_source)
-                                current_source = {}
-                    
-                    # Display last source if exists
-                    if current_source:
-                        display_source(current_source)
-                        
-                else:
-                    # No sources section, display answer only
-                    st.subheader("🤖 Answer")
-                    with st.container():
-                        st.markdown(f"""
-                        <div style=padding: 20px; border-radius: 10px; border-left: 4px solid #1f77b4;">
-                            {answer}
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.info("ℹ️ No specific sources were cited for this response.")
                 
             except Exception as e:
                 st.error(f"❌ Error: {e}")
@@ -572,28 +590,122 @@ ollama pull llama3
                     st.info("💡 **Missing Dependencies:**")
                     st.code("py -m pip install sentence-transformers chromadb", language="bash")
     
+    # Handle settings changes for existing answer
+    elif settings_changed and st.session_state.last_question and st.session_state.last_answer:
+        st.info("🔄 Settings changed - regenerating response with new settings...")
+        with st.spinner("🤔 Applying new settings..."):
+            try:
+                # Regenerate answer with new settings
+                answer = ask_your_files_with_citations(
+                    question=st.session_state.last_question,
+                    embedding_manager=embedding_manager,
+                    vector_store=vector_store,
+                    db_manager=db_manager,
+                    llm_client=llm_client,
+                    k=k,
+                    show_detailed_citations=show_detailed,
+                    show_metadata=show_metadata
+                )
+                
+                # Update session state
+                st.session_state.last_answer = answer
+                st.session_state.last_settings = current_settings.copy()
+                
+                st.success("✅ Response updated with new settings!")
+                
+            except Exception as e:
+                st.error(f"❌ Error updating response: {e}")
+    
+    # Display the current answer if we have one
+    if st.session_state.last_question and st.session_state.last_answer:
+        # Enhanced Result Display with Clear Separation
+        st.markdown("---")
+        
+        # Show the question that was asked
+        st.subheader(f"💭 Question: {st.session_state.last_question}")
+        st.markdown("---")
+        
+        # Use the stored answer
+        answer = st.session_state.last_answer
+        
+        # Split answer from citations
+        if "📚 SOURCES:" in answer:
+            answer_part, sources_part = answer.split("📚 SOURCES:", 1)
+            
+            # Display the answer in a prominent container
+            st.subheader("🤖 Answer")
+            with st.container():
+                st.markdown(f"""
+                <div style=padding: 20px; border-radius: 10px; border-left: 4px solid #1f77b4;">
+                    {answer_part.strip()}
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Clear visual separation
+            st.markdown("---")
+            
+            # Display sources with enhanced formatting
+            st.subheader("📚 Sources & Citations")
+            
+            # Parse and display sources in a structured way
+            sources_lines = sources_part.strip().split('\n')
+            current_source = {}
+            
+            for line in sources_lines:
+                line = line.strip()
+                if not line or line == '=' * 50:
+                    continue
+                    
+                if line.startswith('[') and ']' in line:
+                    # New source entry
+                    if current_source:
+                        display_source(current_source)
+                    
+                    # Parse source header
+                    source_num = line.split(']')[0][1:]
+                    source_name = line.split('📄 ')[1].split(' (')[0] if '📄 ' in line else line.split('] ')[1]
+                    
+                    current_source = {
+                        'number': source_num,
+                        'name': source_name,
+                        'details': []
+                    }
+                    
+                    # Add section info if present
+                    if ' (section ' in line:
+                        section_info = line.split(' (section ')[1].split(')')[0]
+                        current_source['section'] = section_info
+                
+                elif line.startswith('📊 Relevance:') or line.startswith('📂 Path:') or line.startswith('📋 Type:') or line.startswith('📅 Added:'):
+                    if current_source:
+                        current_source['details'].append(line)
+                
+                elif line.startswith('-' * 30):
+                    # End of current source
+                    if current_source:
+                        display_source(current_source)
+                        current_source = {}
+            
+            # Display last source if exists
+            if current_source:
+                display_source(current_source)
+                
+        else:
+            # No sources section, display answer only
+            st.subheader("🤖 Answer")
+            with st.container():
+                st.markdown(f"""
+                <div style=padding: 20px; border-radius: 10px; border-left: 4px solid #1f77b4;">
+                    {answer}
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.info("ℹ️ No specific sources were cited for this response.")
+    
+    # Handle empty question submission
     elif ask_button:
         st.warning("Please enter a question first!")
     
-    # Tips section
-    with st.sidebar:
-        st.subheader("💡 Tips")
-        st.write("""
-        **For better results:**
-        - Be specific in your questions
-        - Ask about topics likely in your documents
-        - Try different phrasings if needed
-        - Use factual questions for best results
-        """)
-        
-        st.subheader("🔧 System Info")
-        try:
-            vector_info = vector_store.get_collection_info()
-            st.write(f"Vector store: {vector_info['count']} documents")
-            st.write(f"Database: {stats['document_count']} documents")
-        except:
-            st.write("System status: Unknown")
-
 elif mode == "📁 Upload Documents":
     st.title("📁 Upload Documents")
     st.write("Upload and process documents into the vector store")
@@ -652,8 +764,8 @@ elif mode == "📁 Upload Documents":
     uploaded_files = st.file_uploader(
         "Choose files to upload",
         accept_multiple_files=True,
-        type=['pdf', 'docx', 'md', 'markdown'],
-        help="Supported formats: PDF, DOCX, Markdown (.md)"
+        type=['pdf', 'docx', 'md', 'markdown', 'ics'],
+        help="Supported formats: PDF, DOCX, Markdown (.md), Calendar (.ics)"
     )
     
     if uploaded_files:
@@ -685,7 +797,7 @@ elif mode == "📁 Upload Documents":
         
         # Show supported formats
         st.subheader("📋 Supported File Formats")
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.write("**📄 PDF Files**")
             st.write("• Research papers")
@@ -701,3 +813,8 @@ elif mode == "📁 Upload Documents":
             st.write("• .md files")
             st.write("• README files")
             st.write("• Technical docs")
+        with col4:
+            st.write("**📅 Calendar Files**")
+            st.write("• .ics files")
+            st.write("• Event schedules")
+            st.write("• Meeting calendars")
