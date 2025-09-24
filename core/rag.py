@@ -1773,8 +1773,13 @@ def ask_your_files(
         # Step 2: Format context for LLM
         context = format_context_for_llm(retrieved_chunks, max_context_length)
         
-        # Step 3: Create system prompt
-        system_prompt = custom_system_prompt or """You are a helpful AI assistant that answers questions based on provided documents. 
+        # Step 3: Create system prompt with current date
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        system_prompt = custom_system_prompt or f"""You are a helpful AI assistant that answers questions based on provided documents. 
+
+Current date: {current_date}
 
 Instructions:
 - Answer the user's question using ONLY the information provided in the documents below
@@ -1783,7 +1788,8 @@ Instructions:
 - If the documents don't contain enough information to answer the question, say so clearly
 - Be concise but thorough
 - If multiple documents contain relevant information, synthesize them in your response
-- Only reference document numbers that actually exist in the provided context"""
+- Only reference document numbers that actually exist in the provided context
+- When relevant, consider the current date when interpreting time-sensitive information"""
 
         # Step 4: Create the full prompt
         full_prompt = f"""Based on the following documents, please answer this question: {question}

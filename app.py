@@ -213,7 +213,7 @@ if 'selected_mode' not in st.session_state:
     st.session_state.selected_mode = "📚 Ask Your Files"  # Default mode
 
 # Mode selection with highlighted buttons
-modes = ["💬 Chat with LLM", "📚 Ask Your Files", "📁 Upload Documents"]
+modes = ["📚 Ask Your Files", "📁 Upload Documents"]
 
 for mode_option in modes:
     # Check if this is the currently selected mode
@@ -232,26 +232,8 @@ for mode_option in modes:
 # Use the selected mode
 mode = st.session_state.selected_mode
 
-if mode == "💬 Chat with LLM":
-    st.title("💬 Chat with Local LLM")
-    st.write("Direct conversation with your local language model")
-    
-    prompt = st.text_input("Prompt:", "Say exactly: Hello World")
-    go = st.button("Send", key="chat_send")
-
-    if go:
-        try:
-            llm = LLMClient(model="llama3")
-            with st.spinner("Thinking locally..."):
-                out = llm.chat(prompt, stream=False)
-            st.success("Done!")
-            st.text(out)
-        except LLMError as e:
-            st.error(str(e))
-
-elif mode == "📚 Ask Your Files":
+if mode == "📚 Ask Your Files":
     st.title("📚 Ask Your Files")
-    st.write("Ask questions about your documents with source citations")
     
     # Check if databases exist
     chroma_path = Path("data/chroma")
@@ -288,231 +270,14 @@ elif mode == "📚 Ask Your Files":
         stats = db_manager.get_database_stats()
         docs = db_manager.get_all_documents()
         
-        # Main statistics
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Documents", stats['document_count'])
-        with col2:
-            st.metric("Chunks", stats['chunk_count'])
-        with col3:
-            st.metric("Database Size", f"{stats['database_size_mb']} MB")
-        
-        # Comprehensive file list
-        st.subheader("📚 Available Documents")
-        
-        if not docs:
-            st.info("No documents available. Upload some files using the 'Upload Documents' tab!")
-        else:
-            # File list controls
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                search_term = st.text_input("🔍 Search documents:", placeholder="Filter by filename...")
-            with col2:
-                show_details = st.checkbox("Show details", value=False)
-            
-            # Filter documents
-            if search_term:
-                filtered_docs = [doc for doc in docs if search_term.lower() in doc['file_name'].lower()]
-            else:
-                filtered_docs = docs
-            
-            st.write(f"Showing {len(filtered_docs)} of {len(docs)} documents:")
-            
-            # Display documents in a nice format
-            for i, doc in enumerate(filtered_docs):
-                with st.container():
-                    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-                    
-                    with col1:
-                        # File icon based on type
-                        icon = {"pdf": "📄", "docx": "📝", ".pdf": "📄", ".docx": "📝", ".md": "📋", ".markdown": "📋", ".ics": "📅"}.get(doc['file_type'], "📄")
-                        st.write(f"{icon} **{doc['file_name']}**")
-                        
-                        if show_details:
-                            # Get chunks info
-                            chunks = db_manager.get_chunks_by_document_id(doc['id'])
-                            st.caption(f"📂 Path: {doc.get('file_path', 'N/A')}")
-                            st.caption(f"📊 {doc['word_count']} words, {len(chunks)} chunks")
-                            st.caption(f"📅 Added: {doc['created_at'][:19] if doc.get('created_at') else 'Unknown'}")
-                    
-                    with col2:
-                        st.metric("Words", f"{doc['word_count']:,}")
-                    
-                    with col3:
-                        # Get chunk count
-                        chunks = db_manager.get_chunks_by_document_id(doc['id'])
-                        st.metric("Chunks", len(chunks))
-                    
-                    with col4:
-                        st.write(f"**{doc['file_type']}**")
-                        
-                        # File actions (in a subtle way)
-                        if show_details:
-                            with st.popover("⚙️", help="File actions"):
-                                st.write(f"**Actions for {doc['file_name']}**")
-                                
-                                if st.button("🗑️ Remove from database", key=f"delete_{doc['id']}", help="Remove this document and its chunks"):
-                                    try:
-                                        # Delete from database and vector store
-                                        success = db_manager.delete_document(doc['id'], vector_store)
-                                        if success:
-                                            st.success(f"Removed {doc['file_name']} from database and vector store")
-                                            st.rerun()
-                                        else:
-                                            st.error("Failed to remove document")
-                                    except Exception as e:
-                                        st.error(f"Error removing document: {e}")
-                                
-                                st.caption("⚠️ This will remove the document from the vector store and database.")
-                
-                # Add separator
-                if i < len(filtered_docs) - 1:
-                    st.divider()
-            
-            # Bulk actions
-            if filtered_docs and show_details:
-                st.markdown("---")
-                st.write("**Bulk Actions:**")
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    if st.button("📊 Export Document List", help="Export list of documents as text"):
-                        export_text = "Document List Export\n" + "="*50 + "\n\n"
-                        for doc in filtered_docs:
-                            chunks = db_manager.get_chunks_by_document_id(doc['id'])
-                            export_text += f"• {doc['file_name']} ({doc['file_type']})\n"
-                            export_text += f"  Words: {doc['word_count']:,}, Chunks: {len(chunks)}\n"
-                            export_text += f"  Added: {doc['created_at'][:19] if doc.get('created_at') else 'Unknown'}\n\n"
-                        
-                        st.download_button(
-                            "💾 Download List",
-                            export_text,
-                            file_name="document_list.txt",
-                            mime="text/plain"
-                        )
-                
-                with col2:
-                    if st.button("🔄 Refresh Database Stats", help="Recalculate database statistics"):
-                        st.rerun()
-                    
-                    # Add synchronization button
-                    if st.button("🔗 Fix Orphaned References", help="Synchronize database and vector store to fix orphaned document references"):
-                        with st.spinner("🔗 Synchronizing database and vector store..."):
-                            try:
-                                sync_result = synchronize_database_and_vector_store(
-                                    vector_store=vector_store,
-                                    db_manager=db_manager
-                                )
-                                
-                                if sync_result['success']:
-                                    if sync_result['orphaned_vectors_found'] > 0:
-                                        st.warning(f"⚠️ Found {sync_result['orphaned_vectors_found']} orphaned document references")
-                                        st.info("💡 **Recommendation:** Use 'Clear All Data' and re-upload documents for complete cleanup")
-                                    else:
-                                        st.success("✅ No orphaned references found - database and vector store are synchronized")
-                                else:
-                                    st.error("❌ Synchronization failed")
-                                    for error in sync_result.get('errors', []):
-                                        st.error(f"• {error}")
-                                        
-                            except Exception as e:
-                                st.error(f"❌ Error during synchronization: {e}")
-                        
-                        st.rerun()
-                
-                with col3:
-                    total_docs = len(docs)
-                    if total_docs > 0:
-                        st.metric("Total Storage", f"{stats['database_size_mb']} MB")
-                        
-                        # Initialize session state for clear confirmation
-                        if 'show_clear_confirmation' not in st.session_state:
-                            st.session_state.show_clear_confirmation = False
-                        
-                        # Clear All Data button
-                        if not st.session_state.show_clear_confirmation:
-                            if st.button("🗑️ Clear All Data", 
-                                       help="Remove ALL documents from database and vector store", 
-                                       type="secondary"):
-                                st.session_state.show_clear_confirmation = True
-                                st.rerun()
-                        
-                        # Show confirmation dialog
-                        if st.session_state.show_clear_confirmation:
-                            st.warning("⚠️ **DANGER: This will permanently delete ALL your documents!**")
-                            st.write("This action will:")
-                            st.write("• Remove all documents from the database")
-                            st.write("• Clear the entire vector store") 
-                            st.write("• Cannot be undone!")
-                            
-                            col_confirm1, col_confirm2 = st.columns(2)
-                            with col_confirm1:
-                                if st.button("❌ Cancel", key="cancel_clear"):
-                                    st.session_state.show_clear_confirmation = False
-                                    st.rerun()
-                            
-                            with col_confirm2:
-                                if st.button("🗑️ Yes, Delete Everything", 
-                                           key="confirm_clear", 
-                                           type="primary"):
-                                    try:
-                                        with st.spinner("🗑️ Clearing all data..."):
-                                            # Use the comprehensive clear function
-                                            result = clear_all_chunks_and_documents(
-                                                vector_store=vector_store,
-                                                db_manager=db_manager
-                                            )
-                                            
-                                            # Reset confirmation state
-                                            st.session_state.show_clear_confirmation = False
-                                            
-                                            if result['success']:
-                                                st.success("✅ **All data cleared successfully!**")
-                                                
-                                                # Show detailed results
-                                                if result['stats_before']:
-                                                    stats_before = result['stats_before']
-                                                    cleared_docs = stats_before.get('document_count', 0)
-                                                    cleared_chunks = stats_before.get('chunk_count', 0)
-                                                    cleared_vector = stats_before.get('vector_store_count', 0)
-                                                    
-                                                    st.info(f"📊 **Cleanup Summary:**\n"
-                                                           f"• Removed {cleared_docs} documents\n"
-                                                           f"• Removed {cleared_chunks} chunks from database\n"
-                                                           f"• Removed {cleared_vector} vectors from store")
-                                                
-                                                st.info("💡 You can now upload new documents using the 'Upload Documents' tab.")
-                                                time.sleep(2)  # Brief pause to show success message
-                                                st.rerun()
-                                            else:
-                                                st.error("❌ **Failed to clear all data**")
-                                                
-                                                # Show specific errors
-                                                if result['errors']:
-                                                    st.error("**Errors encountered:**")
-                                                    for error in result['errors']:
-                                                        st.error(f"• {error}")
-                                                
-                                                # Show partial success
-                                                if result['database_cleared'] and not result['vector_store_cleared']:
-                                                    st.warning("⚠️ Database cleared but vector store failed")
-                                                elif result['vector_store_cleared'] and not result['database_cleared']:
-                                                    st.warning("⚠️ Vector store cleared but database failed")
-                                                    
-                                    except Exception as e:
-                                        st.session_state.show_clear_confirmation = False
-                                        st.error(f"❌ Error clearing data: {e}")
-                    
     except Exception as e:
         st.error(f"Error loading document stats: {e}")
         st.stop()
     
-    # Configuration options
-    with st.sidebar:
-        with st.expander("⚙️ Settings", expanded=False):
-            k = st.slider("Number of chunks to retrieve", 1, 10, 5)
-            show_metadata = st.checkbox("Show file metadata", True)
-            show_detailed = st.checkbox("Show detailed citations", True)
+    # Default settings (will be overridden in main dropdown)
+    k = 5
+    show_metadata = True
+    show_detailed = True
     
     # Initialize session state for preserving responses
     if 'last_question' not in st.session_state:
@@ -521,9 +286,6 @@ elif mode == "📚 Ask Your Files":
         st.session_state.last_answer = ""
     if 'last_settings' not in st.session_state:
         st.session_state.last_settings = {}
-    
-    # Enhanced Question Interface
-    st.subheader("💬 Ask Your Documents")
     
     # Create two columns for the question interface
     col1, col2 = st.columns([4, 1])
@@ -537,13 +299,13 @@ elif mode == "📚 Ask Your Files":
         )
     
     with col2:
-        # Submit button
-        st.write("")  # Add spacing
-        ask_button = st.button("🔍 Submit", type="primary", use_container_width=True)
+        # Submit button - align with text input
+        st.markdown("<div style='height: 1.75rem;'></div>", unsafe_allow_html=True)
+        ask_button = st.button("Submit", type="primary", use_container_width=True)
         
         # Clear button if there's a stored response
         if st.session_state.get('last_answer'):
-            if st.button("🗑️ Clear", help="Clear the current response", use_container_width=True):
+            if st.button("Clear", help="Clear the current response", use_container_width=True):
                 st.session_state.last_question = ""
                 st.session_state.last_answer = ""
                 st.session_state.last_settings = {}
@@ -706,6 +468,236 @@ ollama pull llama3
     elif ask_button:
         st.warning("Please enter a question first!")
     
+    # Available Documents section as collapsible expander
+    with st.expander("⚙️ Settings, Documents & Database Info", expanded=False):
+        # Query Settings
+        st.subheader("⚙️ Query Settings")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            k = st.slider("Number of chunks to retrieve", 1, 10, 5)
+        with col2:
+            show_metadata = st.checkbox("Show file metadata", True)
+        with col3:
+            show_detailed = st.checkbox("Show detailed citations", True)
+        
+        st.markdown("---")
+        
+        # Database statistics
+        st.subheader("📊 Database Statistics")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Documents", stats['document_count'])
+        with col2:
+            st.metric("Chunks", stats['chunk_count'])
+        with col3:
+            st.metric("Database Size", f"{stats['database_size_mb']} MB")
+        
+        st.markdown("---")
+        
+        # Document list
+        if not docs:
+            st.info("No documents available. Upload some files using the 'Upload Documents' tab!")
+        else:
+            # File list controls
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                search_term = st.text_input("🔍 Search documents:", placeholder="Filter by filename...")
+            with col2:
+                show_details = st.checkbox("Show details", value=False)
+            
+            # Filter documents
+            if search_term:
+                filtered_docs = [doc for doc in docs if search_term.lower() in doc['file_name'].lower()]
+            else:
+                filtered_docs = docs
+            
+            st.write(f"Showing {len(filtered_docs)} of {len(docs)} documents:")
+            
+            # Display documents in a nice format
+            for i, doc in enumerate(filtered_docs):
+                with st.container():
+                    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+                    
+                    with col1:
+                        # File icon based on type
+                        icon = {"pdf": "📄", "docx": "📝", ".pdf": "📄", ".docx": "📝", ".md": "📋", ".markdown": "📋", ".ics": "📅"}.get(doc['file_type'], "📄")
+                        st.write(f"{icon} **{doc['file_name']}**")
+                        
+                        if show_details:
+                            # Get chunks info
+                            chunks = db_manager.get_chunks_by_document_id(doc['id'])
+                            st.caption(f"📂 Path: {doc.get('file_path', 'N/A')}")
+                            st.caption(f"📊 {doc['word_count']} words, {len(chunks)} chunks")
+                            st.caption(f"📅 Added: {doc['created_at'][:19] if doc.get('created_at') else 'Unknown'}")
+                    
+                    with col2:
+                        st.metric("Words", f"{doc['word_count']:,}")
+                    
+                    with col3:
+                        # Get chunk count
+                        chunks = db_manager.get_chunks_by_document_id(doc['id'])
+                        st.metric("Chunks", len(chunks))
+                    
+                    with col4:
+                        st.write(f"**{doc['file_type']}**")
+                        
+                        # File actions (in a subtle way)
+                        if show_details:
+                            with st.popover("⚙️", help="File actions"):
+                                st.write(f"**Actions for {doc['file_name']}**")
+                                
+                                if st.button("🗑️ Remove from database", key=f"delete_{doc['id']}", help="Remove this document and its chunks"):
+                                    try:
+                                        # Delete from database and vector store
+                                        success = db_manager.delete_document(doc['id'], vector_store)
+                                        if success:
+                                            st.success(f"Removed {doc['file_name']} from database and vector store")
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to remove document")
+                                    except Exception as e:
+                                        st.error(f"Error removing document: {e}")
+                                
+                                st.caption("⚠️ This will remove the document from the vector store and database.")
+                
+                # Add separator
+                if i < len(filtered_docs) - 1:
+                    st.divider()
+            
+            # Bulk actions
+            if filtered_docs and show_details:
+                st.markdown("---")
+                st.write("**Bulk Actions:**")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("📊 Export Document List", help="Export list of documents as text"):
+                        export_text = "Document List Export\n\n"
+                        for doc in filtered_docs:
+                            chunks = db_manager.get_chunks_by_document_id(doc['id'])
+                            export_text += f"• {doc['file_name']} ({doc['file_type']})\n"
+                            export_text += f"  Words: {doc['word_count']:,}, Chunks: {len(chunks)}\n"
+                            export_text += f"  Added: {doc['created_at'][:19] if doc.get('created_at') else 'Unknown'}\n\n"
+                        
+                        st.download_button(
+                            "💾 Download List",
+                            export_text,
+                            file_name="document_list.txt",
+                            mime="text/plain"
+                        )
+                
+                with col2:
+                    if st.button("🔄 Refresh Database Stats", help="Recalculate database statistics"):
+                        st.rerun()
+                    
+                    # Add synchronization button
+                    if st.button("🔗 Fix Orphaned References", help="Synchronize database and vector store to fix orphaned document references"):
+                        with st.spinner("🔗 Synchronizing database and vector store..."):
+                            try:
+                                sync_result = synchronize_database_and_vector_store(
+                                    vector_store=vector_store,
+                                    db_manager=db_manager
+                                )
+                                
+                                if sync_result['success']:
+                                    if sync_result['orphaned_vectors_found'] > 0:
+                                        st.warning(f"⚠️ Found {sync_result['orphaned_vectors_found']} orphaned document references")
+                                        st.info("💡 **Recommendation:** Use 'Clear All Data' and re-upload documents for complete cleanup")
+                                    else:
+                                        st.success("✅ No orphaned references found - database and vector store are synchronized")
+                                else:
+                                    st.error("❌ Synchronization failed")
+                                    for error in sync_result.get('errors', []):
+                                        st.error(f"• {error}")
+                                        
+                            except Exception as e:
+                                st.error(f"❌ Error during synchronization: {e}")
+                        
+                        st.rerun()
+                
+                with col3:
+                    total_docs = len(docs)
+                    if total_docs > 0:
+                        st.metric("Total Storage", f"{stats['database_size_mb']} MB")
+                        
+                        # Initialize session state for clear confirmation
+                        if 'show_clear_confirmation' not in st.session_state:
+                            st.session_state.show_clear_confirmation = False
+                        
+                        # Clear All Data button
+                        if not st.session_state.show_clear_confirmation:
+                            if st.button("🗑️ Clear All Data", 
+                                       help="Remove ALL documents from database and vector store", 
+                                       type="secondary"):
+                                st.session_state.show_clear_confirmation = True
+                                st.rerun()
+                        
+                            # Show confirmation dialog
+                        if st.session_state.show_clear_confirmation:
+                            st.warning("⚠️ **DANGER: This will permanently delete ALL your documents!**")
+                            st.write("This action will:")
+                            st.write("• Remove all documents from the database")
+                            st.write("• Clear the entire vector store") 
+                            st.write("• Cannot be undone!")
+                            
+                            col_confirm1, col_confirm2 = st.columns(2)
+                            with col_confirm1:
+                                if st.button("❌ Cancel", key="cancel_clear"):
+                                    st.session_state.show_clear_confirmation = False
+                                    st.rerun()
+                            
+                            with col_confirm2:
+                                if st.button("🗑️ Yes, Delete Everything", 
+                                           key="confirm_clear", 
+                                           type="primary"):
+                                    try:
+                                        with st.spinner("🗑️ Clearing all data..."):
+                                            # Use the comprehensive clear function
+                                            result = clear_all_chunks_and_documents(
+                                                vector_store=vector_store,
+                                                db_manager=db_manager
+                                            )
+                                            
+                                            # Reset confirmation state
+                                            st.session_state.show_clear_confirmation = False
+                                            
+                                            if result['success']:
+                                                st.success("✅ **All data cleared successfully!**")
+                                                
+                                                # Show detailed results
+                                                if result['stats_before']:
+                                                    stats_before = result['stats_before']
+                                                    cleared_docs = stats_before.get('document_count', 0)
+                                                    cleared_chunks = stats_before.get('chunk_count', 0)
+                                                    cleared_vector = stats_before.get('vector_store_count', 0)
+                                                    
+                                                    st.info(f"📊 **Cleanup Summary:**\n"
+                                                           f"• Removed {cleared_docs} documents\n"
+                                                           f"• Removed {cleared_chunks} chunks from database\n"
+                                                           f"• Removed {cleared_vector} vectors from store")
+                                                
+                                                st.info("💡 You can now upload new documents using the 'Upload Documents' tab.")
+                                                time.sleep(2)  # Brief pause to show success message
+                                                st.rerun()
+                                            else:
+                                                st.error("❌ **Failed to clear all data**")
+                                                
+                                                # Show specific errors
+                                                if result['errors']:
+                                                    st.error("**Errors encountered:**")
+                                                    for error in result['errors']:
+                                                        st.error(f"• {error}")
+                                                
+                                                # Show partial success
+                                                if result['database_cleared'] and not result['vector_store_cleared']:
+                                                    st.warning("⚠️ Database cleared but vector store failed")
+                                                elif result['vector_store_cleared'] and not result['database_cleared']:
+                                                    st.warning("⚠️ Vector store cleared but database failed")
+                                                    
+                                    except Exception as e:
+                                        st.session_state.show_clear_confirmation = False
+                                        st.error(f"❌ Error clearing data: {e}")
+
 elif mode == "📁 Upload Documents":
     st.title("📁 Upload Documents")
     st.write("Upload and process documents into the vector store")
@@ -727,36 +719,6 @@ elif mode == "📁 Upload Documents":
     if embedding_manager is None:
         st.error("Failed to initialize system components")
         st.stop()
-    
-    # Current system status
-    try:
-        stats = db_manager.get_database_stats()
-        vector_info = vector_store.get_collection_info()
-        
-        st.subheader("📊 Current System Status")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Documents", stats['document_count'])
-        with col2:
-            st.metric("Chunks", stats['chunk_count'])
-        with col3:
-            st.metric("Vector Store", vector_info['count'])
-        with col4:
-            st.metric("DB Size", f"{stats['database_size_mb']} MB")
-            
-    except Exception as e:
-        st.error(f"Error loading system status: {e}")
-    
-    # Upload configuration
-    st.subheader("⚙️ Upload Settings")
-    col1, col2 = st.columns(2)
-    with col1:
-        chunk_size = st.slider("Chunk Size (characters)", 100, 1000, 500)
-        chunk_overlap = st.slider("Chunk Overlap (characters)", 0, 200, 50)
-    with col2:
-        st.info("💡 **Chunk Settings:**\n\n"
-                "• **Chunk Size**: Larger chunks preserve context but may be less precise\n"
-                "• **Overlap**: Helps maintain context across chunk boundaries")
     
     # File upload section
     st.subheader("📎 Select Files to Upload")
@@ -783,17 +745,45 @@ elif mode == "📁 Upload Documents":
             use_container_width=True
         )
         
-        if process_button:
-            process_uploaded_files(
-                uploaded_files, 
-                embedding_manager, 
-                vector_store, 
-                db_manager,
-                chunk_size,
-                chunk_overlap
-            )
-    else:
-        st.info("👆 Upload files using the file picker above")
+    # Default settings (will be overridden if expander is used)
+    chunk_size = 500
+    chunk_overlap = 50
+    
+    # System Status, Settings & Formats in collapsible dropdown
+    with st.expander("⚙️ System Status, Settings & Supported Formats", expanded=False):
+        # Current system status
+        try:
+            stats = db_manager.get_database_stats()
+            vector_info = vector_store.get_collection_info()
+            
+            st.subheader("📊 Current System Status")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Documents", stats['document_count'])
+            with col2:
+                st.metric("Chunks", stats['chunk_count'])
+            with col3:
+                st.metric("Vector Store", vector_info['count'])
+            with col4:
+                st.metric("DB Size", f"{stats['database_size_mb']} MB")
+                
+        except Exception as e:
+            st.error(f"Error loading system status: {e}")
+        
+        st.markdown("---")
+        
+        # Upload configuration
+        st.subheader("⚙️ Upload Settings")
+        col1, col2 = st.columns(2)
+        with col1:
+            chunk_size = st.slider("Chunk Size (characters)", 100, 1000, 500, key="chunk_size_slider")
+            chunk_overlap = st.slider("Chunk Overlap (characters)", 0, 200, 50, key="chunk_overlap_slider")
+        with col2:
+            st.info("💡 **Chunk Settings:**\n\n"
+                    "• **Chunk Size**: Larger chunks preserve context but may be less precise\n"
+                    "• **Overlap**: Helps maintain context across chunk boundaries")
+        
+        st.markdown("---")
         
         # Show supported formats
         st.subheader("📋 Supported File Formats")
@@ -818,3 +808,29 @@ elif mode == "📁 Upload Documents":
             st.write("• .ics files")
             st.write("• Event schedules")
             st.write("• Meeting calendars")
+    
+    # Handle file processing
+    if uploaded_files:
+        st.write(f"📁 Selected {len(uploaded_files)} file(s):")
+        
+        # Preview uploaded files
+        for i, file in enumerate(uploaded_files, 1):
+            file_size_mb = len(file.getvalue()) / (1024 * 1024)
+            st.write(f"{i}. **{file.name}** ({file.type}) - {file_size_mb:.2f} MB")
+        
+        # Process files button
+        process_button = st.button(
+            f"🚀 Process {len(uploaded_files)} File(s)",
+            type="primary",
+            use_container_width=True
+        )
+        
+        if process_button:
+            process_uploaded_files(
+                uploaded_files, 
+                embedding_manager, 
+                vector_store, 
+                db_manager,
+                chunk_size,
+                chunk_overlap
+            )
